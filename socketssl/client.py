@@ -65,10 +65,8 @@ class Client:
                 payload = Payload.model_validate_json(data_bytes.decode())
                 if self._callback:
                     await self._callback(Response(payload.source, payload.destination, payload.data))
-        except asyncio.CancelledError:
-            logger.info("Server closed connection.")
-        except asyncio.IncompleteReadError:
-            logger.info("Client got terminated.")
+        except (asyncio.CancelledError, asyncio.IncompleteReadError):
+            logger.info("Server closed connection or client got terminated.")
         finally:
             await self.disconnect()
 
