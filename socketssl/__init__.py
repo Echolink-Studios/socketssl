@@ -5,4 +5,4 @@ from .util import Response
 
 __all__ = ["Client", "Server", "Response"]
 
-__version__ = "2.0.0"
+__version__ = "2.0.1"
