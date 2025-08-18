@@ -1,6 +1,6 @@
 import asyncio
 import logging
-from typing import Awaitable, Callable
+from typing import Awaitable, Callable, Self
 
 from .util import HEADER, Payload, Response
 
@@ -9,59 +9,62 @@ logger = logging.getLogger(__name__)
 
 class Client:
 
-    def __init__(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter, *, name: str,
-                 callback: Callable[[Response], Awaitable[None]] | None = None):
-        self.name = name
+    def __init__(self, name: str, *, callback: Callable[[Response], Awaitable[None]] | None = None):
+        self._name = name
         self._callback = callback
-        self.reader = reader
-        self.writer = writer
+        self._disconnected = asyncio.Event()
+        self._reader: asyncio.StreamReader | None = None
+        self._writer: asyncio.StreamWriter | None = None
 
-    @classmethod
-    async def connect(cls, *, host: str, port: int, name: str,
-                      callback: Callable[[Response], Awaitable[None]] | None = None):
+    async def connect(self, host: str, port: int) -> Self:
+        """Connect to the server at the specified host and port."""
         try:
-            reader, writer = await asyncio.open_connection(host, port)
-        except ConnectionRefusedError:
+            self._reader, self._writer = await asyncio.open_connection(host, port)
+        except (ConnectionRefusedError, OSError):
             raise ConnectionRefusedError(f"Could not connect to '{host}:{port}' - Is the server running?")
 
-        client = cls(reader, writer, name=name, callback=callback)
+        if not await self._has_valid_name():
+            await self.disconnect()
+            raise ConnectionAbortedError(f"Name '{self._name}' cannot be used as it is already taken.")
 
-        if await client._has_valid_name():
-            logger.info(f"Connected to '{host}:{port}'")
-            asyncio.create_task(client._receive())
-            return client
-        else:
-            await client.disconnect()
-            raise ConnectionRefusedError(f"Name '{name}' cannot be used as it is already taken.")
+        logger.info(f"Connected to '{host}:{port}'")
+        asyncio.create_task(self._receive())
+        return self
 
     async def send(self, destination: str, message: str):
+        """Send a message to the specified destination."""
+        data = Payload(source=self._name, destination=destination, data=message).model_dump_json().encode()
+        length_header = str(len(data)).encode()
+        length_header += b' ' * (HEADER - len(length_header))
         try:
-            if self.writer:
-                data = Payload(source=self.name, destination=destination, data=message).model_dump_json().encode()
-                length_header = str(len(data)).encode()
-                length_header += b' ' * (HEADER - len(length_header))
-                self.writer.write(length_header + data)
-                await self.writer.drain()
+            self._writer.write(length_header + data)
+            await self._writer.drain()
         except ConnectionResetError:
-            await self.disconnect()
+            logger.warning("Connection is closed. Cannot send message.")
 
     async def disconnect(self):
-        if self.writer and not self.writer.is_closing():
-            logger.info("Disconnecting...")
-            self.writer.close()
-            await self.writer.wait_closed()
+        """Disconnect from the server."""
+        logger.info("Disconnecting...")
+        self._disconnected.set()
+        if not self._writer.is_closing():
+            self._writer.close()
+            await self._writer.wait_closed()
 
     def is_connected(self) -> bool:
         """Check if the client is still connected."""
-        return self.writer is not None and not self.writer.is_closing()
+        return not self._disconnected.is_set()
+
+    async def _wait_for_disconnect(self):
+        """Wait until the client is disconnected."""
+        await self._disconnected.wait()
 
     async def _receive(self) -> None:
         """Background task for receiving messages from the server."""
         try:
             while True:
-                length_bytes = await self.reader.readexactly(HEADER)
+                length_bytes = await self._reader.readexactly(HEADER)
                 length = int(length_bytes.decode().strip())
-                data_bytes = await self.reader.readexactly(length)
+                data_bytes = await self._reader.readexactly(length)
                 payload = Payload.model_validate_json(data_bytes.decode())
                 if self._callback:
                     await self._callback(Response(payload.source, payload.destination, payload.data))
@@ -71,6 +74,6 @@ class Client:
             await self.disconnect()
 
     async def _has_valid_name(self):
-        await self.send("SERVER", self.name)
-        response = await self.reader.readexactly(1)
+        await self.send("SERVER", self._name)
+        response = await self._reader.readexactly(1)
         return bool(int(response.decode()))
