@@ -1,6 +1,6 @@
 import asyncio
 import logging
-from typing import Awaitable, Callable, Self
+from typing import Awaitable, Callable, Coroutine, Self
 
 from .util import HEADER, Payload, Response
 
@@ -9,9 +9,25 @@ logger = logging.getLogger(__name__)
 
 class Client:
 
-    def __init__(self, name: str, *, callback: Callable[[Response], Awaitable[None]] | None = None):
+    def __init__(self, name: str, *,
+            callback: Callable[[Response], Awaitable[None]] | None = None,
+            main_routine: Callable[[Self], Coroutine] | None = None):
+        """
+        Initialize a Client instance.
+
+        Parameters:
+            name (str): The name to identify this client.
+            callback (Callable[[Response], Awaitable[None]], optional):
+                An async function to be called when a message is received.
+            main_routine (Callable[[Self], Coroutine], optional):
+                An async function representing the main routine to run after connecting.
+                This should represent the main loop of your application.
+                Providing it here guarantees proper error and connection handling.
+                Leave empty if you want to handle the main loop manually.
+        """
         self._name = name
         self._callback = callback
+        self._main_routine = main_routine
         self._disconnected = asyncio.Event()
         self._reader: asyncio.StreamReader | None = None
         self._writer: asyncio.StreamWriter | None = None
@@ -29,6 +45,20 @@ class Client:
 
         logger.info(f"Connected to '{host}:{port}'")
         asyncio.create_task(self._receive())
+
+        if self._main_routine:
+            disconnect_task = asyncio.create_task(self._wait_for_disconnect())
+            send_task = asyncio.create_task(self._main_routine(self))
+            try:
+                done, pending = await asyncio.wait(
+                    {send_task, disconnect_task},
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                for task in pending:
+                    task.cancel()
+            except asyncio.CancelledError:
+                pass
+
         return self
 
     async def send(self, destination: str, message: str):
