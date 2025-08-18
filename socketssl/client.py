@@ -28,7 +28,8 @@ class Client:
 
         if await client._has_valid_name():
             logger.info(f"Connected to '{host}:{port}'")
-            asyncio.create_task(client._receive())
+            if callback is not None:
+                asyncio.create_task(client._receive())
             return client
         else:
             await client.disconnect()
