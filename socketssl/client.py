@@ -10,8 +10,10 @@ logger = logging.getLogger(__name__)
 class Client:
 
     def __init__(self, name: str, *,
-            callback: Callable[[Response], Awaitable[None]] | None = None,
-            main_routine: Callable[[Self], Coroutine] | None = None):
+                 callback: Callable[[Response], Awaitable[None]] = None,
+                 main_routine: Callable[[Self], Coroutine] | Callable[[Self, ...], Coroutine] | None = None,
+                 main_routine_args: tuple = (),
+                 on_disconnect: Callable = None):
         """
         Initialize a Client instance.
 
@@ -28,12 +30,15 @@ class Client:
         self._name = name
         self._callback = callback
         self._main_routine = main_routine
+        self._main_routine_args = main_routine_args
         self._disconnected = asyncio.Event()
+        self._on_disconnect = on_disconnect
         self._reader: asyncio.StreamReader | None = None
         self._writer: asyncio.StreamWriter | None = None
 
     async def connect(self, host: str, port: int) -> Self:
         """Connect to the server at the specified host and port."""
+        self._disconnected.clear()
         try:
             self._reader, self._writer = await asyncio.open_connection(host, port)
         except (ConnectionRefusedError, OSError):
@@ -48,7 +53,7 @@ class Client:
 
         if self._main_routine:
             disconnect_task = asyncio.create_task(self._wait_for_disconnect())
-            send_task = asyncio.create_task(self._main_routine(self))
+            send_task = asyncio.create_task(self._main_routine(self, *self._main_routine_args))
             try:
                 done, pending = await asyncio.wait(
                     {send_task, disconnect_task},
@@ -74,11 +79,19 @@ class Client:
 
     async def disconnect(self):
         """Disconnect from the server."""
+        if self._disconnected.is_set():
+            logger.info("Already disconnected.")
+            return
         logger.info("Disconnecting...")
         self._disconnected.set()
         if not self._writer.is_closing():
             self._writer.close()
             await self._writer.wait_closed()
+        if self._on_disconnect:
+            if asyncio.iscoroutinefunction(self._on_disconnect):
+                await self._on_disconnect()
+            else:
+                self._on_disconnect()
 
     def is_connected(self) -> bool:
         """Check if the client is still connected."""
@@ -98,8 +111,10 @@ class Client:
                 payload = Payload.model_validate_json(data_bytes.decode())
                 if self._callback:
                     await self._callback(Response(payload.source, payload.destination, payload.data))
-        except (asyncio.CancelledError, asyncio.IncompleteReadError):
-            logger.info("Server closed connection or client got terminated.")
+        except asyncio.CancelledError:
+            logger.info("Client got terminated.")
+        except asyncio.IncompleteReadError:
+            logger.info("Server closed connection.")
         finally:
             await self.disconnect()
 
