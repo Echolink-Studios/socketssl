@@ -68,7 +68,7 @@ class Client:
         """Check if the client is still connected."""
         return not self._disconnected.is_set()
 
-    async def _wait_for_disconnect(self):
+    async def wait_for_disconnect(self):
         """Wait until the client is disconnected."""
         await self._disconnected.wait()
 
